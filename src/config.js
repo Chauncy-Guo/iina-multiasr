@@ -1,5 +1,5 @@
 /**
- * config.js °™ Centralized preference access.
+ * config.js ùù Centralized preference access.
  *
  * All IINA preference reads/writes go through this module so that the
  * rest of the codebase never has to know preference key strings or
@@ -13,10 +13,10 @@ const DEFAULTS = {
     source_language: "auto",
     show_secondary_subtitle: true,
 
-    // MiMo
+    // MiMo (Xiaomi) - Token Plan uses /v1 chat/completions with input_audio
     mimo_api_key: "",
-    mimo_endpoint: "https://api.xiaomimimo.com/v1",
-    mimo_asr_model: "mimo-v2.5-asr",
+    mimo_endpoint: "https://token-plan-cn.xiaomimimo.com/v1",
+    mimo_asr_model: "mimo-v2.5",
     mimo_translation_model: "mimo-v2.5",
 
     // Doubao
