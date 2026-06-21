@@ -1,0 +1,49 @@
+{
+  "name": "MultiASR Subtitles",
+  "version": "0.1.0",
+  "identifier": "io.github.chauncy.iina-multiasr",
+  "description": "Generate English subtitles for local videos with cloud ASR (Doubao, MiMo) and translate them via LLM (MiMo, DeepSeek).",
+  "author": {
+    "name": "Chauncy",
+    "url": "https://github.com/Chauncy-Guo"
+  },
+  "homepage": "https://github.com/Chauncy-Guo/iina-multiasr",
+  "entry": "dist/index.js",
+  "globalEntry": "dist/global.js",
+  "permissions": [
+    "show-osd",
+    "file-system",
+    "network-request"
+  ],
+  "allowedDomains": [
+    "*"
+  ],
+  "preferencesPage": "dist/pref.html",
+  "preferenceDefaults": {
+    "asr_provider": "mimo",
+    "enable_translation": true,
+    "target_language": "zh-CN",
+    "source_language": "auto",
+    "mimo_api_key": "",
+    "mimo_endpoint": "https://api.xiaomimimo.com/v1",
+    "mimo_asr_model": "mimo-v2.5-asr",
+    "mimo_translation_model": "mimo-v2.5",
+    "doubao_app_id": "",
+    "doubao_access_token": "",
+    "doubao_endpoint": "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
+    "doubao_resource_id": "volc.seedasr.sauc.duration",
+    "doubao_language": "en",
+    "deepseek_api_key": "",
+    "deepseek_endpoint": "https://api.deepseek.com/v1",
+    "deepseek_model": "deepseek-chat",
+    "ffmpeg_path": "/opt/homebrew/bin/ffmpeg",
+    "request_timeout_sec": 900,
+    "show_secondary_subtitle": true
+  },
+  "subtitleProviders": [
+    {
+      "id": "multiasr",
+      "name": "Cloud ASR + Translate"
+    }
+  ]
+}
