@@ -159,7 +159,7 @@ export class DoubaoASRProvider extends BaseASRProvider {
                 : (() => {
                       const txt = (result.text || "").trim();
                       if (!txt) return [];
-                      // No timestamps ¡ú wrap full text in a single cue
+                      // No timestamps -> wrap full text in a single cue
                       // covering the whole file. IINA will still show it.
                       return [{ start: 0, end: 86400000, text: txt }];
                   })();
@@ -238,6 +238,7 @@ function openWebSocket(url, subProtocols) {
                         e?.message || e?.toString() || "unknown"
                     }`,
                     { provider: "doubao", code: "WS_ERROR" },
+                ),
             );
         };
     });

@@ -10,15 +10,17 @@ const PREFIX = "[MultiASR]";
 
 function emit(level, msg) {
     const line = `${PREFIX} ${msg}`;
-    // Always log to console
-    try { console[level]?.(line) ?? console.log(line); } catch (_) {}
-    // Show user-visible OSD for info/warn/error
-    if (level === "log") return;
-    try {
-        if (iina?.core?.osd) {
-            iina.core.osd(line);
-        }
-    } catch (_) { /* ignore */ }
+    // Avoid the "console[level] is not a function" path: in webview
+    // console.log is a real function but console.info/warn/error are
+    // not, so fall back to console.log unconditionally.
+    try { console.log(line); } catch (_) {}
+    // Show user-visible OSD for warn/error only; info-level lines
+    // are otherwise too chatty in the OSD.
+    if (level === "warn" || level === "error") {
+        try {
+            if (iina?.core?.osd) iina.core.osd(line);
+        } catch (_) { /* ignore */ }
+    }
 }
 
 export const log = {
