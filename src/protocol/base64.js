@@ -1,5 +1,5 @@
 /**
- * protocol/base64.js ¡ª Standard base64 encode/decode for binary payloads.
+ * protocol/base64.js ?? Standard base64 encode/decode for binary payloads.
  *
  * The IINA plugin webview is a WKWebView, which exposes btoa/atob but
  * they only operate on Latin-1 strings. We use a binary-safe variant.

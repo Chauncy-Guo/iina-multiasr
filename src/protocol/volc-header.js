@@ -1,5 +1,5 @@
 /**
- * protocol/volc-header.js ¡ª Binary protocol for Doubao Seed ASR 2.0.
+ * protocol/volc-header.js ?? Binary protocol for Doubao Seed ASR 2.0.
  *
  * Mirrors the Python reference at
  *   reference/doubao-asr/doubao_asr.py

@@ -8,6 +8,8 @@
     "url": "https://github.com/Chauncy-Guo"
   },
   "homepage": "https://github.com/Chauncy-Guo/iina-multiasr",
+  "ghRepo": "Chauncy-Guo/iina-multiasr",
+  "ghVersion": 2,
   "entry": "dist/index.js",
   "globalEntry": "dist/global.js",
   "permissions": [

@@ -1,19 +1,19 @@
-/**
- * global.js ¡ª Global entry, runs in IINA's main process context.
- *
- * Currently unused: all logic (HTTP, WebSocket, file I/O) runs in
- * the webview because the plugin permissions include
- * "network-request" and "file-system". If we ever need to spawn
- * long-running native processes (e.g. for streaming ASR that
- * survives navigation), we'll add them here.
- *
- * Required by Info.json: `globalEntry` must point to a real file.
- */
+// global.js -- Global entry, runs in IINA's main process context.
+//
+// All ASR / translation work happens in the webview (via dist/index.js
+// registered as a subtitle provider). This global entry is kept only
+// because Info.json requires `globalEntry` to point to a real file.
+//
+// If we ever need to spawn long-running native processes (e.g. for
+// streaming ASR that survives navigation), we'll wire them up here.
 
 export function activate() {
-    // no-op
+    // Reserved for future native-side setup.
 }
 
 export function deactivate() {
-    // no-op
+    // Reserved for future native-side teardown.
 }
+
+// Self-reference so bundlers don't tree-shake this file to zero bytes.
+export const __globalEntry = { activate, deactivate };

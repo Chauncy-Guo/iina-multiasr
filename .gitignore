@@ -1,10 +1,16 @@
 # ============================================================
 # IINA plugin build artifacts
 # ============================================================
-dist/
+# dist/ is committed on main (IINA downloads the repo directly when
+# installing via "Install from GitHub"). To regenerate, run bundle.sh
+# and commit the updated dist/ folder.
+# dist/
 node_modules/
 *.log
 .DS_Store
+
+# Local build outputs (iinaplgz packages)
+*.iinaplgz
 
 # ============================================================
 # Generated subtitle caches (created at runtime)
@@ -21,3 +27,4 @@ node_modules/
 .env.*
 secrets.json
 *-credentials.json
+.parcel-cache/

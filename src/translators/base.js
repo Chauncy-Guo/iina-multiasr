@@ -1,5 +1,5 @@
 /**
- * translators/base.js ¡ª Abstract translation provider interface.
+ * translators/base.js ?? Abstract translation provider interface.
  *
  * All translators must implement:
  *   - validateCredentials()
