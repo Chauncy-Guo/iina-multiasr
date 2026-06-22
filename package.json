@@ -4,7 +4,7 @@
   "description": "IINA plugin: cloud ASR + LLM translation",
   "private": true,
   "scripts": {
-    "build": "parcel build src/index.js src/global.js --dist-dir dist --no-cache --no-source-maps",
+    "build": "rm -rf dist .parcel-cache && parcel build --target entry --target global --no-source-maps",
     "build:html": "cp pref.html dist/pref.html",
     "clean": "rm -rf dist .parcel-cache",
     "pack": "iina-plugin pack .",
@@ -13,13 +13,24 @@
   },
   "targets": {
     "default": {
-      "context": "browser",
+      "context": "web-worker",
       "outputFormat": "global",
       "isLibrary": false,
       "optimize": true,
       "engines": {
         "browsers": "last 1 Chrome version"
-      }
+      },
+      "distDir": "dist"
+    },
+    "entry": {
+      "source": "src/index.js",
+      "isLibrary": false,
+      "distDir": "dist"
+    },
+    "global": {
+      "source": "src/global.js",
+      "isLibrary": false,
+      "distDir": "dist"
     }
   },
   "devDependencies": {

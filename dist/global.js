@@ -1,0 +1,1 @@
+try{globalThis.__multiasrGlobalLoaded=!0,"u">typeof iina&&iina&&iina.console?iina.console.log("MultiASR: global entry loaded"):"u">typeof console&&console&&console.log&&console.log("MultiASR: global entry loaded (no iina.console)")}catch(o){}
