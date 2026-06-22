@@ -1,7 +1,7 @@
 /**
- * audio/extractor.js ùù Extract an audio track from a video file via ffmpeg.
+ * audio/extractor.js ?? Extract an audio track from a video file via ffmpeg.
  *
- * The output is a 16kHz mono 16-bit PCM WAV ùù the format required by
+ * The output is a 16kHz mono 16-bit PCM WAV ?? the format required by
  * both Doubao and MiMo ASR APIs. We pipe ffmpeg's stdout directly into
  * a temp file under @tmp.
  */
@@ -48,7 +48,7 @@ export async function extractAudio(sourcePath) {
         outPath,
     ];
 
-    log.info(`Extracting audio via ffmpeg ùù ${outPath}`);
+    log.info(`Extracting audio via ffmpeg ?? ${outPath}`);
     await iina.utils.exec(ffmpeg, ...args);
     return outPath;
 }

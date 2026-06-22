@@ -1,8 +1,8 @@
 /**
- * translators/deepseek.js ¡ª DeepSeek LLM translation provider.
+ * translators/deepseek.js -- DeepSeek LLM translation provider.
  *
  * Same OpenAI-compatible protocol as MiMo. DeepSeek's deepseek-chat
- * model is excellent for translation tasks. (DeepSeek is text-only ¡ª
+ * model is excellent for translation tasks. (DeepSeek is text-only --
  * it does not offer an ASR API, hence we only use it here.)
  */
 

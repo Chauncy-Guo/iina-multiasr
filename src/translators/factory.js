@@ -1,5 +1,5 @@
 /**
- * translators/factory.js ¡ª Create a translator instance by name.
+ * translators/factory.js ?? Create a translator instance by name.
  */
 
 import { MiMoTranslator } from "./mimo.js";

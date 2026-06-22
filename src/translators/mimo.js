@@ -1,5 +1,5 @@
 /**
- * translators/mimo.js ùù MiMo LLM translation provider.
+ * translators/mimo.js ?? MiMo LLM translation provider.
  *
  * Uses the OpenAI-compatible /chat/completions endpoint and sends
  * each cue as a separate user message, with a system prompt that

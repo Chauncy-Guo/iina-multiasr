@@ -1,5 +1,5 @@
 /**
- * config.js ùù Centralized preference access.
+ * config.js ?? Centralized preference access.
  *
  * All IINA preference reads/writes go through this module so that the
  * rest of the codebase never has to know preference key strings or

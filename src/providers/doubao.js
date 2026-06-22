@@ -1,5 +1,5 @@
 /**
- * providers/doubao.js ¡ª ByteDance Doubao Seed ASR 2.0 provider.
+ * providers/doubao.js -- ByteDance Doubao Seed ASR 2.0 provider.
  *
  * Implements the binary WebSocket protocol from
  *   reference/doubao-asr/doubao_asr.py
@@ -78,7 +78,7 @@ export class DoubaoASRProvider extends BaseASRProvider {
         // append the auth to the URL fragment as a workaround that
         // Volc's gateway accepts when constructing the session.
         // (Alternative: use a sub-protocol string.)
-        const finalUrl = wsUrl; // no headers in WS; rely on app/access keys in URL? ¡ª use sub-protocol.
+        const finalUrl = wsUrl; // no headers in WS; rely on app/access keys in URL? -- use sub-protocol.
         const subProtocols = headers.map(h => h.replace(/:\s*/, "="));
 
         const ws = await openWebSocket(finalUrl, subProtocols);

@@ -1,5 +1,5 @@
 /**
- * index.js ¡ª IINA plugin main entry.
+ * index.js -- IINA plugin main entry.
  *
  * Registers a subtitle provider that:
  *   1. extracts the audio track from the current video,

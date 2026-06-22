@@ -1,5 +1,5 @@
 /**
- * subtitle/srt.js ¡ª Build & parse SRT subtitle strings.
+ * subtitle/srt.js -- Build & parse SRT subtitle strings.
  *
  * SRT format:
  *   1

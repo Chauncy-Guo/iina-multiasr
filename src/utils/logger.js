@@ -1,8 +1,8 @@
 /**
- * utils/logger.js ¡ª Thin OSD/log wrapper for the IINA plugin runtime.
+ * utils/logger.js -- Thin OSD/log wrapper for the IINA plugin runtime.
  *
  * Messages are written to the IINA developer console (visible via
- * "Help ¡ú Open Plugin Log Folder") AND pushed to the on-screen OSD
+ * "Help -- Open Plugin Log Folder") AND pushed to the on-screen OSD
  * when level is "info" or higher.
  */
 

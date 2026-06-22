@@ -1,5 +1,5 @@
 /**
- * providers/mimo.js ùù Xiaomi MiMo ASR provider.
+ * providers/mimo.js ?? Xiaomi MiMo ASR provider.
  *
  * Xiaomi MiMo (token-plan) does not expose a dedicated ASR endpoint.
  * We use the OpenAI-compatible /chat/completions endpoint with the

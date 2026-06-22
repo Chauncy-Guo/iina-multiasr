@@ -1,5 +1,5 @@
 /**
- * utils/http.js ¡ª HTTP helper using the IINA plugin fetch API.
+ * utils/http.js -- HTTP helper using the IINA plugin fetch API.
  *
  * Falls back to executing curl via iina.utils.exec when fetch is
  * unavailable (older IINA versions or sandbox restrictions).
