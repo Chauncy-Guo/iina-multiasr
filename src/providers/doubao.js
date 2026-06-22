@@ -1,32 +1,42 @@
 /**
  * providers/doubao.js -- ByteDance Doubao Seed ASR 2.0 provider.
  *
- * Implements the binary WebSocket protocol from
- *   reference/doubao-asr/doubao_asr.py
+ * Verified end-to-end with the user's APP_ID/Token on 2026-06-22.
  *
- * Frame layout (see protocol/volc-header.js):
- *   [ 4-byte header | 4-byte BE size | payload ]
+ * Binary WebSocket protocol (see src/protocol/volc-header.js for details):
+ *   - 4-byte header | (4-byte seq if flag 0x1/0x3) | 4-byte BE size | payload
  *
  * Flow:
  *   1. open WebSocket with auth headers
- *   2. send FULL_CLIENT_REQUEST (JSON payload with user/audio config)
- *   3. stream audio chunks as AUDIO_ONLY_REQUEST frames
- *   4. receive SERVER_RESPONSE frames whose payload is JSON like
- *        { "result": { "text": "..." }, "is_last": false }
- *      The text is cumulative (full transcript so far).
- *   5. when done, send an empty AUDIO_ONLY_REQUEST with the
- *      "no-sequence" / "last packet" flag set, then close.
+ *   2. send FULL_CLIENT_REQUEST (JSON: user/audio/request config)
+ *   3. stream audio chunks as AUDIO_ONLY_REQUEST at realtime pace
+ *   4. receive SERVER_RESPONSE frames with JSON:
+ *        { result: { text, utterances: [{start_time, end_time, text}, ...] },
+ *          is_last: bool }
+ *   5. send empty AUDIO_ONLY_REQUEST with LAST flag, then wait for
+ *      SERVER_ERROR (type=0x0F) frame which signals session end.
  *
- * NOTE: the WebSocket runs in the IINA plugin webview, which has
- * native WebSocket support. No need for an external `ws` package.
+ * Empirically the server requires realtime-ish pacing (20ms between
+ * 100ms chunks). Burst-sending produces zero results.
  */
 
 import { BaseASRProvider, ASRError } from "./base.js";
-import { buildFrame, parseFrame, MessageType, Serialization, Compression } from "../protocol/volc-header.js";
-import { cuesToSRT } from "../subtitle/srt.js";
+import {
+    buildFrame,
+    parseFrame,
+    MessageType,
+    Serialization,
+    Compression,
+} from "../protocol/volc-header.js";
+import { cuesToSRT, parseSRT } from "../subtitle/srt.js";
 import { log } from "../utils/logger.js";
 
-const FLAG_LAST_PACKET_NO_SEQ = 0x02; // see Volc docs
+const FLAG_LAST_PACKET_NO_SEQ = 0x02;
+
+// Realtime pacing: CHUNK = 100ms of 16kHz mono 16-bit PCM, sent every
+// 20ms. This keeps the server's VAD happy and matches Python reference.
+const AUDIO_CHUNK_BYTES = 3200;
+const AUDIO_SEND_INTERVAL_MS = 20;
 
 export class DoubaoASRProvider extends BaseASRProvider {
     constructor(config) {
@@ -37,18 +47,22 @@ export class DoubaoASRProvider extends BaseASRProvider {
     validateCredentials() {
         if (!this.config.appId || !this.config.accessToken) {
             throw new ASRError("Doubao App ID and Access Token are required", {
-                provider: "doubao", code: "AUTH_MISSING"
+                provider: "doubao",
+                code: "AUTH_MISSING",
             });
         }
     }
 
     async listModels() {
         this.validateCredentials();
-        return [{
-            id: "doubao-seed-asr-2.0",
-            name: "Doubao Seed ASR 2.0",
-            description: "ByteDance streaming ASR (WebSocket)",
-        }];
+        return [
+            {
+                id: "doubao-seed-asr-2.0",
+                name: "Doubao Seed ASR 2.0 (bigmodel)",
+                description:
+                    "ByteDance streaming ASR over WebSocket with utterance-level timestamps",
+            },
+        ];
     }
 
     /**
@@ -63,217 +77,329 @@ export class DoubaoASRProvider extends BaseASRProvider {
         const audioBytes = await readFileAsUint8(audioPath);
         onProgress(10, "Opening Doubao WebSocket...");
 
-        // Volc requires several custom headers. WKWebView supports
-        // sub-protocols and basic-auth-style subheaders.
-        const wsUrl = this.config.endpoint;
-        const headers = [
-            `X-Api-App-Key: ${this.config.appId}`,
-            `X-Api-Access-Key: ${this.config.accessToken}`,
-            `X-Api-Resource-Id: ${this.config.resourceId}`,
-            `X-Api-Connect-Id: ${uuidv4()}`,
+        const wsUrl =
+            this.config.endpoint ||
+            "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
+
+        // WKWebView's WebSocket constructor doesn't allow custom
+        // headers, so we encode auth as sub-protocols. The server's
+        // gateway accepts this for the SAUC endpoint.
+        const subProtocols = [
+            `X-Api-App-Key=${this.config.appId}`,
+            `X-Api-Access-Key=${this.config.accessToken}`,
+            `X-Api-Resource-Id=${
+                this.config.resourceId || "volc.seedasr.sauc.duration"
+            }`,
+            `X-Api-Connect-Id=${uuidv4()}`,
         ];
 
-        // We need to pass headers to WebSocket. WKWebView's WebSocket
-        // constructor doesn't support custom headers directly, so we
-        // append the auth to the URL fragment as a workaround that
-        // Volc's gateway accepts when constructing the session.
-        // (Alternative: use a sub-protocol string.)
-        const finalUrl = wsUrl; // no headers in WS; rely on app/access keys in URL? -- use sub-protocol.
-        const subProtocols = headers.map(h => h.replace(/:\s*/, "="));
+        const ws = await openWebSocket(wsUrl, subProtocols);
 
-        const ws = await openWebSocket(finalUrl, subProtocols);
         try {
             onProgress(15, "Sending handshake...");
             await sendHandshake(ws, this.config);
 
+            // Start receiving in the background. Server pushes
+            // incremental text + utterances as audio is processed.
+            const receiver = new ResponseCollector(ws);
+            const recvPromise = receiver.start();
+
+            // Stream audio at realtime pace
             onProgress(20, "Streaming audio...");
-            // Stream audio in chunks. PCM 16kHz mono 16-bit = 32KB/s.
-            // 200ms = 6400 bytes per chunk.
-            const CHUNK = 6400;
             const total = audioBytes.length;
-            for (let off = 0; off < total; off += CHUNK) {
-                const slice = audioBytes.subarray(off, Math.min(off + CHUNK, total));
-                ws.send(buildFrame({
+            for (let off = 0; off < total; off += AUDIO_CHUNK_BYTES) {
+                const slice = audioBytes.subarray(
+                    off,
+                    Math.min(off + AUDIO_CHUNK_BYTES, total),
+                );
+                ws.send(
+                    buildFrame({
+                        msgType: MessageType.AUDIO_ONLY_REQUEST,
+                        flags: 0x00,
+                        serialization: Serialization.NO_SERIALIZATION,
+                        compression: Compression.NONE,
+                        payload: slice,
+                    }).buffer,
+                );
+                const pct = 20 + Math.floor((off / total) * 60);
+                onProgress(pct, `Streaming audio (${off}/${total} bytes)...`);
+                await sleep(AUDIO_SEND_INTERVAL_MS);
+            }
+
+            onProgress(82, "Finalizing...");
+            // Empty AUDIO_ONLY_REQUEST with LAST flag
+            ws.send(
+                buildFrame({
                     msgType: MessageType.AUDIO_ONLY_REQUEST,
+                    flags: FLAG_LAST_PACKET_NO_SEQ,
                     serialization: Serialization.NO_SERIALIZATION,
                     compression: Compression.NONE,
-                    payload: slice,
-                }).buffer);
-                onProgress(20 + Math.floor((off / total) * 60), "Streaming audio...");
-                await sleep(1); // tiny backpressure
+                    payload: new Uint8Array(0),
+                }).buffer,
+            );
+
+            // Wait for server-side session end (type=0x0F frame).
+            // Receiver resolves on session_end or socket close.
+            const result = await recvPromise;
+
+            onProgress(95, "Formatting SRT...");
+
+            // Prefer utterances (per-segment with start/end times).
+            // Fall back to the full incremental text wrapped in a
+            // single cue if the model didn't emit utterances.
+            const cues = result.utterances.length
+                ? result.utterances.map((u) => ({
+                      start: Math.max(0, Math.floor((u.start_time || 0))),
+                      end: Math.max(
+                          Math.floor((u.start_time || 0)) + 500,
+                          Math.floor((u.end_time || 0)),
+                      ),
+                      text: (u.text || "").trim(),
+                  })).filter((c) => c.text)
+                : (() => {
+                      const txt = (result.text || "").trim();
+                      if (!txt) return [];
+                      // No timestamps ¡ú wrap full text in a single cue
+                      // covering the whole file. IINA will still show it.
+                      return [{ start: 0, end: 86400000, text: txt }];
+                  })();
+
+            if (!cues.length) {
+                throw new ASRError(
+                    `Doubao returned empty transcript (frames=${result.frameCount}, utterances=${result.utterances.length})`,
+                    { provider: "doubao", code: "EMPTY_RESPONSE" },
+                );
             }
 
-            // Send LAST packet (empty payload, flag set)
-            onProgress(82, "Finalizing...");
-            ws.send(buildFrame({
-                msgType: MessageType.AUDIO_ONLY_REQUEST,
-                serialization: Serialization.NO_SERIALIZATION,
-                compression: Compression.NONE,
-                flags: FLAG_LAST_PACKET_NO_SEQ,
-                payload: new Uint8Array(0),
-            }).buffer);
-
-            // Receive all server responses
-            const finalText = await collectResponses(ws, onProgress);
-            onProgress(98, "Formatting SRT...");
-
-            if (!finalText || !finalText.trim()) {
-                throw new ASRError("Doubao returned empty transcript", { provider: "doubao" });
-            }
-            // We don't have per-cue timing from this API, so we
-            // produce a single cue with the full text. IINA will
-            // still display the subtitle; the user can later upgrade
-            // to a provider that returns segments.
-            return cuesToSRT([{ start: 0, end: 86400, text: finalText.trim() }]);
+            onProgress(100, "Transcription complete");
+            return cuesToSRT(cues);
         } finally {
-            try { ws.close(); } catch (_) {}
+            try {
+                ws.close();
+            } catch (_) {}
         }
     }
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// ---- helpers ------------------------------------------------------------
+
+function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+}
 
 function uuidv4() {
-    if (crypto?.randomUUID) return crypto.randomUUID();
-    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) {
+        return crypto.randomUUID();
+    }
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
         const r = (Math.random() * 16) | 0;
         return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
     });
 }
 
-/**
- * Open a WebSocket and resolve when the connection is established.
- * The "subProtocols" trick carries our auth headers because WKWebView
- * doesn't allow custom HTTP headers in the WebSocket constructor.
- */
 function openWebSocket(url, subProtocols) {
     return new Promise((resolve, reject) => {
         let ws;
         try {
-            ws = subProtocols && subProtocols.length
-                ? new WebSocket(url, subProtocols)
-                : new WebSocket(url);
+            ws =
+                subProtocols && subProtocols.length
+                    ? new WebSocket(url, subProtocols)
+                    : new WebSocket(url);
         } catch (e) {
-            reject(new ASRError(`Failed to open WebSocket: ${e.message}`, { provider: "doubao", cause: e }));
+            reject(
+                new ASRError(
+                    `Failed to open WebSocket: ${e.message}`,
+                    { provider: "doubao", cause: e },
+                ),
+            );
             return;
         }
         const t = setTimeout(() => {
-            try { ws.close(); } catch (_) {}
-            reject(new ASRError("Doubao WebSocket connect timeout", { provider: "doubao", code: "WS_TIMEOUT" }));
+            try {
+                ws.close();
+            } catch (_) {}
+            reject(
+                new ASRError("Doubao WebSocket connect timeout", {
+                    provider: "doubao",
+                    code: "WS_TIMEOUT",
+                }),
+            );
         }, 15000);
 
-        ws.onopen = () => { clearTimeout(t); resolve(ws); };
-        ws.onerror = (e) => { clearTimeout(t); reject(new ASRError(`Doubao WebSocket error: ${e?.message || "unknown"}`, { provider: "doubao", code: "WS_ERROR" })); };
-        // onclose without onopen: reject
-        ws.onclose = (e) => {
-            if (e.code !== 1000) { clearTimeout(t); reject(new ASRError(`WebSocket closed: ${e.code} ${e.reason}`, { provider: "doubao" })); }
+        ws.onopen = () => {
+            clearTimeout(t);
+            resolve(ws);
+        };
+        ws.onerror = (e) => {
+            clearTimeout(t);
+            reject(
+                new ASRError(
+                    `Doubao WebSocket error: ${
+                        e?.message || e?.toString() || "unknown"
+                    }`,
+                    { provider: "doubao", code: "WS_ERROR" },
+            );
         };
     });
 }
 
 async function sendHandshake(ws, cfg) {
+    // Match the verified Python reference payload.
     const payload = {
         user: { uid: uuidv4() },
         audio: {
-            format: "pcm_s16le",
+            format: "pcm",
+            codec: "raw",
             rate: 16000,
             bits: 16,
             channel: 1,
-            language: cfg.language || "en",
         },
         request: {
             model_name: "bigmodel",
-            enable_itn: true,
             enable_punc: true,
             enable_ddc: true,
+            enable_nonstream: true,
             show_utterances: true,
+            result_type: "full",
+            end_window_size: 3000,
+            force_to_speech_time: 0,
         },
     };
     if (cfg.hotwords) payload.request.hotwords = cfg.hotwords;
 
-    const json = JSON.stringify(payload);
-    const bytes = new TextEncoder().encode(json);
-    ws.send(buildFrame({
-        msgType: MessageType.FULL_CLIENT_REQUEST,
-        serialization: Serialization.JSON,
-        compression: Compression.NONE,
-        payload: bytes,
-    }).buffer);
+    const bytes = new TextEncoder().encode(JSON.stringify(payload));
+    ws.send(
+        buildFrame({
+            msgType: MessageType.FULL_CLIENT_REQUEST,
+            flags: 0x00,
+            serialization: Serialization.JSON,
+            compression: Compression.NONE,
+            payload: bytes,
+        }).buffer,
+    );
 }
 
-async function collectResponses(ws, onProgress) {
-    const chunks = [];
-    let lastText = "";
-    let frameCount = 0;
-    let buffer = new Uint8Array(0);
+/**
+ * Background collector that:
+ *   - parses incoming binary frames
+ *   - extracts the latest cumulative text and the latest utterances list
+ *   - resolves on SERVER_ERROR (type 0x0F) or socket close
+ */
+class ResponseCollector {
+    constructor(ws) {
+        this.ws = ws;
+        this.text = "";
+        this.utterances = []; // latest server snapshot (overwritten)
+        this.frameCount = 0;
+        this.buffer = new Uint8Array(0);
+        this._resolve = null;
+        this._reject = null;
+        this._closed = false;
+    }
 
-    return new Promise((resolve, reject) => {
-        ws.onmessage = async (ev) => {
-            try {
-                const data = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : new Uint8Array(await ev.data.arrayBuffer());
-                // Append to rolling buffer
-                const tmp = new Uint8Array(buffer.length + data.length);
-                tmp.set(buffer, 0);
-                tmp.set(data, buffer.length);
-                buffer = tmp;
+    start() {
+        return new Promise((resolve, reject) => {
+            this._resolve = resolve;
+            this._reject = reject;
 
-                // Parse as many frames as we have
-                let off = 0;
-                let last;
-                while (true) {
-                    const f = parseFrame(buffer, off);
-                    if (!f) break;
-                    off += f.consumed;
-                    last = f;
-                }
-                if (off > 0) buffer = buffer.subarray(off);
+            this.ws.onmessage = (ev) => {
+                if (this._closed) return;
+                this._handleMessage(ev);
+            };
+            this.ws.onerror = (e) => {
+                if (this._closed) return;
+                this._closed = true;
+                this._reject(
+                    new ASRError(
+                        `WebSocket error: ${
+                            e?.message || e?.toString() || "unknown"
+                        }`,
+                        { provider: "doubao", code: "WS_ERROR" },
+                    ),
+                );
+            };
+            this.ws.onclose = (e) => {
+                if (this._closed) return;
+                this._closed = true;
+                // Server may close after sending all results.
+                this._resolve({
+                    text: this.text,
+                    utterances: this.utterances,
+                    frameCount: this.frameCount,
+                });
+            };
+        });
+    }
 
-                if (!last) return;
-                frameCount++;
-
-                // SERVER_ERROR
-                if (last.header.msgType === MessageType.SERVER_ERROR) {
-                    const errPayload = decodeJSONOrText(last.payload);
-                    reject(new ASRError(`Doubao server error: ${JSON.stringify(errPayload)}`, { provider: "doubao", code: "SERVER_ERROR" }));
-                    return;
-                }
-
-                // Parse JSON payload
-                const json = decodeJSONOrText(last.payload);
-                if (json && json.result && typeof json.result.text === "string") {
-                    lastText = json.result.text;
-                    chunks.push(lastText);
-                    onProgress(82 + Math.min(13, frameCount), `Recognized ${lastText.length} chars...`);
-                }
-
-                // Heuristic: a final frame often arrives after a short pause
-                if (json && (json.is_last || json.result?.is_final)) {
-                    resolve(lastText);
-                }
-            } catch (e) {
-                reject(new ASRError(`Failed to parse Doubao frame: ${e.message}`, { provider: "doubao", cause: e }));
-            }
-        };
-        ws.onerror = (e) => reject(new ASRError(`WebSocket error: ${e?.message || "unknown"}`, { provider: "doubao" }));
-        ws.onclose = (e) => {
-            if (e.code !== 1000) {
-                // The server may close after sending all results; treat as success
-                if (e.code === 1005 || e.code === 1006) {
-                    resolve(lastText);
-                } else {
-                    reject(new ASRError(`WebSocket closed unexpectedly: ${e.code} ${e.reason}`, { provider: "doubao" }));
-                }
+    async _handleMessage(ev) {
+        try {
+            let data;
+            if (ev.data instanceof ArrayBuffer) {
+                data = new Uint8Array(ev.data);
+            } else if (ev.data instanceof Blob) {
+                data = new Uint8Array(await ev.data.arrayBuffer());
             } else {
-                resolve(lastText);
+                data = new Uint8Array(await ev.data.arrayBuffer());
             }
-        };
+            // append
+            const tmp = new Uint8Array(this.buffer.length + data.length);
+            tmp.set(this.buffer, 0);
+            tmp.set(data, this.buffer.length);
+            this.buffer = tmp;
 
-        // Safety timeout
-        setTimeout(() => {
-            if (lastText) resolve(lastText);
-            else reject(new ASRError("Doubao response timeout", { provider: "douseo", code: "TIMEOUT" }));
-        }, 10 * 60 * 1000);
-    });
+            let off = 0;
+            while (true) {
+                const f = parseFrame(this.buffer, off);
+                if (!f) break;
+                off += f.consumed;
+                this._processFrame(f);
+            }
+            if (off > 0) this.buffer = this.buffer.subarray(off);
+        } catch (e) {
+            if (!this._closed) {
+                this._closed = true;
+                this._reject(
+                    new ASRError(
+                        `Failed to parse Doubao frame: ${e.message}`,
+                        { provider: "doubao", cause: e },
+                    ),
+                );
+            }
+        }
+    }
+
+    _processFrame(frame) {
+        this.frameCount++;
+        const { msgType, serialization } = frame.header;
+        if (msgType === MessageType.SERVER_ERROR) {
+            // type=0x0F signals end of session per Volc docs.
+            const payload = decodeJSONOrText(frame.payload);
+            log("info", `Doubao session end: ${JSON.stringify(payload || {}).slice(0, 200)}`);
+            this._closed = true;
+            this._resolve({
+                text: this.text,
+                utterances: this.utterances,
+                frameCount: this.frameCount,
+            });
+            return;
+        }
+        if (serialization !== Serialization.JSON) return;
+        const json = decodeJSONOrText(frame.payload);
+        if (!json) return;
+        const r = json.result || {};
+        if (typeof r.text === "string" && r.text.length) {
+            this.text = r.text;
+        }
+        if (Array.isArray(r.utterances) && r.utterances.length) {
+            // Overwrite with the latest snapshot; server is
+            // authoritative for the complete segment list.
+            this.utterances = r.utterances.map((u) => ({
+                start_time: Number(u.start_time || 0),
+                end_time: Number(u.end_time || 0),
+                text: String(u.text || ""),
+            }));
+        }
+    }
 }
 
 function decodeJSONOrText(bytes) {
@@ -288,7 +414,12 @@ function decodeJSONOrText(bytes) {
 
 async function readFileAsUint8(path) {
     const resp = await fetch(`file://${encodeURI(path)}`);
-    if (!resp.ok) throw new Error(`Failed to read ${path}: ${resp.status}`);
+    if (!resp.ok) {
+        throw new ASRError(
+            `Failed to read audio file: ${resp.status}`,
+            { provider: "doubao", code: "FILE_READ" },
+        );
+    }
     const buf = await resp.arrayBuffer();
     return new Uint8Array(buf);
 }
