@@ -28,20 +28,25 @@ const { subtitle, core } = iina;
 
 subtitle.registerProvider("multiasr", {
     search: async () => {
-        try {
-            const asrConfig = Config.getASRConfig();
-            const provider = createASRProvider(asrConfig);
-            const models = await provider.listModels();
-            return models.map((m) => subtitle.item({
-                id: m.id,
-                name: m.name,
-                url: "https://example.invalid",
-                format: "srt",
-            }));
-        } catch (e) {
-            log.error(`search() failed: ${e.message}`);
-            return [];
-        }
+        // IINA hides providers that return 0 items. So we MUST return
+        // at least one item even if the user hasn't configured an API
+        // key yet -- otherwise the panel shows only "Open Subtitles"
+        // and the user can't trigger download() to see the error.
+        //
+        // We do NOT call listModels() / network here. listModels() in
+        // MiMo throws on missing API key, and the search() catch was
+        // swallowing the error and returning []. Surface a static
+        // placeholder instead; the real error (if any) fires in
+        // download() and is shown via OSD.
+        const asrConfig = Config.getASRConfig();
+        const providerName = asrConfig.provider || "asr";
+        const modelId = asrConfig.model || "default";
+        return [subtitle.item({
+            id: modelId,
+            name: `${providerName.toUpperCase()} (${modelId})`,
+            url: "https://example.invalid",
+            format: "srt",
+        })];
     },
 
     description: (item) => {
