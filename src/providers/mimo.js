@@ -13,7 +13,7 @@
 
 import { BaseASRProvider, ASRError } from "./base.js";
 import { postJSON, withRetry } from "../utils/http.js";
-import { parseSRT, cuesToSRT, formatTimestamp } from "../subtitle/srt.js";
+import { parseSRT, cuesToASS, formatTimestamp } from "../subtitle/srt.js";
 import { encodeBase64 } from "../protocol/base64.js";
 import { log } from "../utils/logger.js";
 
@@ -128,6 +128,7 @@ export class MiMoASRProvider extends BaseASRProvider {
         }
 
         onProgress(100, "Transcription complete");
+        // normalizeSrt already returns ASS format
         return srt;
     }
 }
@@ -135,11 +136,34 @@ export class MiMoASRProvider extends BaseASRProvider {
 function stripTrailingSlash(s) { return s.replace(/\/+$/, ""); }
 
 async function readFileAsUint8(path) {
-    // IINA webview exposes a fetch() that can read file:// URLs
-    const resp = await fetch(`file://${encodeURI(path)}`);
-    if (!resp.ok) throw new Error(`Failed to read ${path}: ${resp.status}`);
-    const buf = await resp.arrayBuffer();
-    return new Uint8Array(buf);
+    // Read binary file via base64: use shell to pipe file through base64
+    const { status, stdout } = await iina.utils.exec("/bin/sh", ["-c", `/usr/bin/base64 < ${shellEscapeLocal(path)}`]);
+    if (status !== 0) throw new Error(`readFileAsUint8 failed: ${path}`);
+    return base64ToUint8((stdout || "").replace(/\s+/g, ""));
+}
+
+function shellEscapeLocal(s) {
+    return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+function base64ToUint8(b64) {
+    const CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const lookup = new Uint8Array(128);
+    for (let i = 0; i < CHARS.length; i++) lookup[CHARS.charCodeAt(i)] = i;
+    const pad = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+    const len = Math.floor(b64.length * 3 / 4) - pad;
+    const bytes = new Uint8Array(len);
+    let j = 0;
+    for (let i = 0; i < b64.length; i += 4) {
+        const a = lookup[b64.charCodeAt(i)] || 0;
+        const b = lookup[b64.charCodeAt(i + 1)] || 0;
+        const c = lookup[b64.charCodeAt(i + 2)] || 0;
+        const d = lookup[b64.charCodeAt(i + 3)] || 0;
+        if (j < len) bytes[j++] = (a << 2) | (b >> 4);
+        if (j < len) bytes[j++] = ((b & 0x0F) << 4) | (c >> 2);
+        if (j < len) bytes[j++] = ((c & 0x03) << 6) | d;
+    }
+    return bytes;
 }
 
 /**
@@ -170,9 +194,9 @@ function normalizeSrt(raw) {
 
     const cues = parseSRT(s);
     if (cues.length) {
-        // Re-emit via cuesToSRT to ensure formatting consistency
+        // Re-emit via cuesToASS to ensure formatting consistency
         // and monotonic re-numbering.
-        return cuesToSRT(cues);
+        return cuesToASS(cues, "ASR Original");
     }
     return "";
 }

@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MultiASR Subtitles</title>
+  <style>
+    body {
+      padding: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px;
+      color: #333;
+      margin: 0;
+    }
+    h3 {
+      margin: 0 0 12px 0;
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .video-info {
+      background: #f5f5f5;
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-bottom: 14px;
+      font-size: 12px;
+      color: #666;
+      word-break: break-all;
+    }
+    .video-info .label {
+      color: #999;
+      font-size: 11px;
+      text-transform: uppercase;
+      margin-bottom: 2px;
+    }
+
+    /* Section: a card grouping one action with its progress */
+    .section {
+      border: 1px solid #e5e5e5;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      background: #fafafa;
+    }
+    .section.disabled {
+      opacity: 0.55;
+      pointer-events: none;
+    }
+    .section-title {
+      font-weight: 600;
+      font-size: 13px;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .section-title .badge {
+      font-size: 10px;
+      font-weight: 500;
+      padding: 2px 6px;
+      border-radius: 10px;
+      background: #e0e0e0;
+      color: #555;
+    }
+    .section-title .badge.done { background: #d4edda; color: #155724; }
+    .section-title .badge.error { background: #f8d7da; color: #721c24; }
+    .section-title .badge.running { background: #cce5ff; color: #004085; }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .row label {
+      font-size: 12px;
+      color: #555;
+      flex: 0 0 90px;
+    }
+    select {
+      flex: 1;
+      font-size: 12px;
+      padding: 4px 6px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      background: #fff;
+    }
+
+    .btn {
+      display: inline-block;
+      background: #007aff;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 7px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .btn:hover { background: #0066d6; }
+    .btn:disabled { background: #b0d4ff; cursor: not-allowed; }
+    .btn.secondary { background: #34c759; }
+    .btn.secondary:hover { background: #2aa84c; }
+    .btn.secondary:disabled { background: #b8ebc4; }
+
+    /* Progress bar */
+    .progress-wrap {
+      margin-top: 8px;
+      display: none;
+    }
+    .progress-wrap.active { display: block; }
+    .progress-bar {
+      height: 6px;
+      background: #e0e0e0;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: #007aff;
+      width: 0%;
+      transition: width 0.2s ease;
+    }
+    .progress-fill.translate { background: #34c759; }
+    .progress-text {
+      font-size: 11px;
+      color: #666;
+      margin-top: 4px;
+      min-height: 14px;
+      word-break: break-word;
+    }
+    .progress-text.error { color: #c00; }
+    .progress-text.done { color: #060; }
+
+    .hint {
+      margin-top: 8px;
+      font-size: 11px;
+      color: #999;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <h3>MultiASR Subtitles</h3>
+
+  <div class="video-info">
+    <div class="label">Current Video</div>
+    <div id="video-title">Loading...</div>
+  </div>
+
+  <!-- Section 1: Original (source-language) subtitle generation -->
+  <div class="section" id="section-original">
+    <div class="section-title">
+      <span>1. Original Subtitle (ASR)</span>
+      <span class="badge" id="badge-original">Idle</span>
+    </div>
+    <button id="btn-original" class="btn">Generate Original Subtitle</button>
+    <div class="progress-wrap" id="progress-original">
+      <div class="progress-bar"><div class="progress-fill" id="fill-original"></div></div>
+      <div class="progress-text" id="text-original">Ready</div>
+    </div>
+    <div class="hint">Extracts audio and runs cloud ASR to produce a subtitle in the video's original language (e.g. English).</div>
+  </div>
+
+  <!-- Section 2: Translation -->
+  <div class="section disabled" id="section-translate">
+    <div class="section-title">
+      <span>2. Translate Subtitle</span>
+      <span class="badge" id="badge-translate">Locked</span>
+    </div>
+    <div class="row">
+      <label>Target Lang</label>
+      <select id="target-lang">
+        <option value="zh-CN">Chinese (Simplified)</option>
+        <option value="zh-TW">Chinese (Traditional)</option>
+        <option value="ja">Japanese</option>
+        <option value="ko">Korean</option>
+        <option value="fr">French</option>
+        <option value="de">German</option>
+        <option value="es">Spanish</option>
+        <option value="ru">Russian</option>
+        <option value="pt">Portuguese</option>
+        <option value="it">Italian</option>
+        <option value="ar">Arabic</option>
+        <option value="th">Thai</option>
+        <option value="vi">Vietnamese</option>
+      </select>
+    </div>
+    <button id="btn-translate" class="btn secondary" disabled>Translate Subtitle</button>
+    <div class="progress-wrap" id="progress-translate">
+      <div class="progress-bar"><div class="progress-fill translate" id="fill-translate"></div></div>
+      <div class="progress-text" id="text-translate">Ready</div>
+    </div>
+    <div class="hint">Translates the original subtitle into the selected target language. Available after step 1 completes.</div>
+  </div>
+
+  <script>
+    // --- Element refs ---
+    var btnOriginal = document.getElementById("btn-original");
+    var btnTranslate = document.getElementById("btn-translate");
+    var sectionTranslate = document.getElementById("section-translate");
+    var badgeOriginal = document.getElementById("badge-original");
+    var badgeTranslate = document.getElementById("badge-translate");
+    var progressOriginal = document.getElementById("progress-original");
+    var progressTranslate = document.getElementById("progress-translate");
+    var fillOriginal = document.getElementById("fill-original");
+    var fillTranslate = document.getElementById("fill-translate");
+    var textOriginal = document.getElementById("text-original");
+    var textTranslate = document.getElementById("text-translate");
+    var videoTitleEl = document.getElementById("video-title");
+    var targetLangSelect = document.getElementById("target-lang");
+
+    // --- State ---
+    var originalDone = false;
+    var originalPath = null;
+
+    // --- Helpers ---
+    function setBadge(el, text, cls) {
+      el.textContent = text;
+      el.className = "badge " + (cls || "");
+    }
+
+    function showProgress(wrap, fill, text, percent, msg, state) {
+      wrap.classList.add("active");
+      fill.style.width = Math.max(0, Math.min(100, percent || 0)) + "%";
+      text.textContent = msg || "";
+      text.className = "progress-text" + (state ? " " + state : "");
+    }
+
+    // --- Request current video info on load ---
+    iina.postMessage("get-video-info", {});
+
+    iina.onMessage("video-info", function(data) {
+      videoTitleEl.textContent = data.title || "(no video)";
+    });
+
+    // --- Original subtitle progress updates ---
+    iina.onMessage("original-progress", function(data) {
+      showProgress(progressOriginal, fillOriginal, textOriginal,
+        data.percent, data.message, data.state);
+      if (data.state === "running") {
+        setBadge(badgeOriginal, "Running", "running");
+        btnOriginal.disabled = true;
+      } else if (data.state === "done") {
+        setBadge(badgeOriginal, "Done", "done");
+        btnOriginal.disabled = false;
+        originalDone = true;
+        originalPath = data.path || null;
+        // Unlock translation section
+        sectionTranslate.classList.remove("disabled");
+        btnTranslate.disabled = false;
+        setBadge(badgeTranslate, "Idle");
+      } else if (data.state === "error") {
+        setBadge(badgeOriginal, "Error", "error");
+        btnOriginal.disabled = false;
+      }
+    });
+
+    // --- Translation progress updates ---
+    iina.onMessage("translate-progress", function(data) {
+      showProgress(progressTranslate, fillTranslate, textTranslate,
+        data.percent, data.message, data.state);
+      if (data.state === "running") {
+        setBadge(badgeTranslate, "Running", "running");
+        btnTranslate.disabled = true;
+      } else if (data.state === "done") {
+        setBadge(badgeTranslate, "Done", "done");
+        btnTranslate.disabled = false;
+      } else if (data.state === "error") {
+        setBadge(badgeTranslate, "Error", "error");
+        btnTranslate.disabled = false;
+      }
+    });
+
+    // --- Button handlers ---
+    btnOriginal.addEventListener("click", function() {
+      btnOriginal.disabled = true;
+      setBadge(badgeOriginal, "Running", "running");
+      showProgress(progressOriginal, fillOriginal, textOriginal,
+        0, "Starting...", "running");
+      iina.postMessage("generate-original", {});
+    });
+
+    btnTranslate.addEventListener("click", function() {
+      var lang = targetLangSelect.value;
+      btnTranslate.disabled = true;
+      setBadge(badgeTranslate, "Running", "running");
+      showProgress(progressTranslate, fillTranslate, textTranslate,
+        0, "Starting translation to " + lang + "...", "running");
+      iina.postMessage("translate-subtitle", { targetLang: lang });
+    });
+  </script>
+</body>
+</html>

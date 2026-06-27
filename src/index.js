@@ -1,151 +1,305 @@
 /**
  * index.js -- IINA plugin main entry.
  *
- * Registers a subtitle provider that:
- *   1. checks for an existing local SRT sidecar next to the video
- *      (or under ~/Library/Application Support/IINA-MultiASR/Subtitles/);
- *   2. if missing, extracts the audio track and runs the active ASR
- *      provider (MiMo or Doubao) to generate the English SRT;
- *   3. (optional) translates the SRT to the user's target language;
- *   4. writes both SRT files next to the source video (or fallback),
- *      and returns the absolute paths to IINA for immediate display.
+ * Two-stage pipeline, each triggered independently from the sidebar:
  *
- * IINA loads the first returned file as the primary subtitle, and the
- * second (when present) as a secondary track for bilingual display.
+ *   Stage 1 "generate-original":
+ *     extractAudio -> ASR -> saveSRT(en) -> loadTrack(primary)
+ *     Reports progress via "original-progress" messages (0-100%).
  *
- * File naming: <basename>.<lang>.srt (e.g. "trailer.en.srt")
+ *   Stage 2 "translate-subtitle":
+ *     parseSRT(originalSrt) -> translator.translateCues -> saveSRT(lang)
+ *     -> loadTrack(secondary)
+ *     Reports progress via "translate-progress" messages (0-100%).
+ *
+ * Stage 2 requires Stage 1 to have completed (the sidebar locks the
+ * translate button until then). Both stages honor a local SRT cache
+ * so re-running is fast.
  */
 
 import { Config } from "./config.js";
 import { extractAudio } from "./audio/extractor.js";
-import { parseSRT, cuesToSRT } from "./subtitle/srt.js";
+import { parseSRT, cuesToASS } from "./subtitle/srt.js";
 import { createASRProvider } from "./providers/factory.js";
 import { createTranslator } from "./translators/factory.js";
 import { log } from "./utils/logger.js";
 import { loadLocalSRT, saveSRT } from "./utils/local-store.js";
 
-const { subtitle, core } = iina;
+const { subtitle, sidebar, menu, event, core, mpv, console } = iina;
 
-subtitle.registerProvider("multiasr", {
-    search: async () => {
-        // IINA hides providers that return 0 items. So we MUST return
-        // at least one item even if the user hasn't configured an API
-        // key yet -- otherwise the panel shows only "Open Subtitles"
-        // and the user can't trigger download() to see the error.
-        //
-        // We do NOT call listModels() / network here. listModels() in
-        // MiMo throws on missing API key, and the search() catch was
-        // swallowing the error and returning []. Surface a static
-        // placeholder instead; the real error (if any) fires in
-        // download() and is shown via OSD.
-        const asrConfig = Config.getASRConfig();
-        const providerName = asrConfig.provider || "asr";
-        const modelId = asrConfig.model || "default";
-        return [subtitle.item({
-            id: modelId,
-            name: `${providerName.toUpperCase()} (${modelId})`,
-            url: "https://example.invalid",
-            format: "srt",
-        })];
-    },
+console.log("MultiASR: main entry loaded");
 
-    description: (item) => {
-        return {
-            name: item.data?.id || "Unknown",
-            left: "",
-            right: "Cloud ASR + Translate",
-        };
-    },
+// Force mpv to interpret subtitle files as UTF-8. Without this,
+// SRT files with CJK characters may display as white squares.
+function forceUtf8SubCodepage() {
+    try { mpv.set("sub-codepage", "utf-8"); } catch (_) {}
+}
 
-    download: async (item) => {
-        try {
-            return await runPipeline(item);
-        } catch (e) {
-            log.error(e.message);
-            throw e;
-        }
-    },
+// In-memory cache of the most recent original SRT for the current
+// video, so the translate stage doesn't need to re-read from disk.
+let currentOriginalSrt = null;
+let currentOriginalPath = null;
+let currentVideoUrl = null;
+
+// --- Menu: add "Show Sidebar" so users can open the panel manually ---
+event.on("iina.menu-update", () => {
+    menu.removeAllItems();
+    menu.addItem(
+        menu.item("Show MultiASR Sidebar", () => {
+            sidebar.show();
+        }, { keyBinding: "Meta+p", enabled: core.window.visible }),
+    );
 });
 
-async function runPipeline(item) {
-    // 1. Validate configuration
+// --- Sidebar: load HTML and wire up message handlers ---
+event.on("iina.window-loaded", () => {
+    sidebar.loadFile("dist/ui/sidebar/index.html");
+
+    // Stage 1: generate original-language subtitle via ASR
+    sidebar.onMessage("generate-original", async () => {
+        try {
+            const path = await generateOriginalSubtitle();
+            sidebar.postMessage("original-progress", {
+                percent: 100,
+                message: `Done. Saved: ${path}`,
+                state: "done",
+                path,
+            });
+        } catch (e) {
+            log.error(`Stage 1 failed: ${e.message}`);
+            sidebar.postMessage("original-progress", {
+                percent: 0,
+                message: `Error: ${e.message}`,
+                state: "error",
+            });
+        }
+    });
+
+    // Stage 2: translate the original subtitle into target language
+    sidebar.onMessage("translate-subtitle", async (data) => {
+        try {
+            const targetLang = (data && data.targetLang) || Config.get("target_language", "zh-CN");
+            const path = await translateSubtitle(targetLang);
+            sidebar.postMessage("translate-progress", {
+                percent: 100,
+                message: `Done. Saved: ${path}`,
+                state: "done",
+                path,
+            });
+        } catch (e) {
+            log.error(`Stage 2 failed: ${e.message}`);
+            sidebar.postMessage("translate-progress", {
+                percent: 0,
+                message: `Error: ${e.message}`,
+                state: "error",
+            });
+        }
+    });
+
+    // Sidebar asks for current video info to display
+    sidebar.onMessage("get-video-info", () => {
+        sendVideoInfo();
+    });
+});
+
+function sendVideoInfo() {
+    sidebar.postMessage("video-info", {
+        title: core.status.title || "(no video)",
+        url: core.status.url || "",
+    });
+}
+
+// --- Subtitle provider: use CUSTOM_IMPLEMENTATION so IINA defers to
+//     our sidebar UI instead of showing a search-result list. ---
+subtitle.registerProvider("multiasr", {
+    search: async () => {
+        sidebar.show();
+        return subtitle.CUSTOM_IMPLEMENTATION;
+    },
+    description: (item) => null,
+    download: async (item) => null,
+});
+
+// =========================================================================
+// Stage 1: Original subtitle generation (ASR)
+// =========================================================================
+
+async function generateOriginalSubtitle() {
     Config.validate();
     const videoUrl = core.status.url;
     if (!videoUrl) {
         throw new Error("No video is currently playing.");
     }
-    log.info(`Pipeline start: ${videoUrl}`);
+    currentVideoUrl = videoUrl;
+    log.info(`Stage 1 start: ${videoUrl}`);
 
-    // 2. Try local SRT cache for English transcript
-    let englishSrt = null;
-    let englishPath = null;
+    // 1. Try local SRT cache first
     const cachedEn = await loadLocalSRT(videoUrl, "en");
     if (cachedEn) {
-        englishSrt = cachedEn.content;
-        englishPath = cachedEn.path;
-        core.osd(`MultiASR: loaded cached English SRT (${englishSrt.length} chars)`);
-    } else {
-        // 3. Extract audio
-        core.osd("MultiASR: extracting audio...");
-        const audioPath = await extractAudio(videoUrl);
-        log.info(`Audio extracted to ${audioPath}`);
-
-        // 4. ASR
-        const asrConfig = Config.getASRConfig();
-        const asrProvider = createASRProvider(asrConfig);
-        const onASRProgress = (p, msg) =>
-            core.osd(`MultiASR ASR: ${msg} (${p}%)`);
-
-        englishSrt = await asrProvider.transcribe(audioPath, onASRProgress);
-        log.info(`English SRT generated: ${englishSrt.length} chars`);
-
-        // Persist next to video (with fallback to ~/Library/...)
-        englishPath = await saveSRT(videoUrl, "en", englishSrt);
+        currentOriginalSrt = cachedEn.content;
+        currentOriginalPath = cachedEn.path;
+        core.osd("MultiASR: loaded cached original SRT");
+        sidebar.postMessage("original-progress", {
+            percent: 100,
+            message: `Loaded cached SRT: ${cachedEn.path}`,
+            state: "running",
+        });
+        try {
+            forceUtf8SubCodepage();
+            core.subtitle.loadTrack(currentOriginalPath);
+        } catch (e) {
+            log.warn(`Failed to load subtitle track: ${e.message}`);
+        }
+        return currentOriginalPath;
     }
 
-    const out = [englishPath];
+    // 2. Extract audio
+    sidebar.postMessage("original-progress", {
+        percent: 5,
+        message: "Extracting audio...",
+        state: "running",
+    });
+    core.osd("MultiASR: extracting audio...");
+    const audioPath = await extractAudio(videoUrl);
+    log.info(`Audio extracted to ${audioPath}`);
 
-    // 5. Translation (optional)
-    if (Config.getBool("enable_translation", true)) {
-        const trConfig = Config.getTranslatorConfig();
-        const translator = createTranslator(trConfig);
-        const cues = parseSRT(englishSrt);
-        const targetLang = Config.get("target_language", "zh-CN");
-        const targetName = Config.getTargetLanguageName();
-        const sourceLang = Config.get("source_language", "auto");
-        const onTrProgress = (p, msg) =>
-            core.osd(`MultiASR Translate: ${msg} (${p}%)`);
+    // 3. ASR transcription
+    const asrConfig = Config.getASRConfig();
+    const asrProvider = createASRProvider(asrConfig);
+    const onASRProgress = (p, msg) => {
+        core.osd(`MultiASR ASR: ${msg} (${p}%)`);
+        sidebar.postMessage("original-progress", {
+            percent: p,
+            message: `ASR: ${msg}`,
+            state: "running",
+        });
+    };
 
-        // Try local cache for translation first
-        const cachedTr = await loadLocalSRT(videoUrl, targetLang);
-        let translatedPath;
-        if (cachedTr) {
-            translatedPath = cachedTr.path;
-            core.osd(
-                `MultiASR: loaded cached ${targetName} SRT (${cachedTr.content.length} chars)`,
-            );
-        } else {
-            const translatedCues = await translator.translateCues(
-                cues,
-                sourceLang,
-                targetName,
-                onTrProgress,
-            );
-            const translatedSrt = cuesToSRT(translatedCues);
-            translatedPath = await saveSRT(videoUrl, targetLang, translatedSrt);
-        }
+    const englishSrt = await asrProvider.transcribe(audioPath, onASRProgress);
+    log.info(`Original SRT generated: ${englishSrt.length} chars`);
 
-        out.push(translatedPath);
-        if (Config.getBool("show_secondary_subtitle", true)) {
-            core.osd(
-                `MultiASR: done. Primary = English, Secondary = ${targetName}`,
-            );
-        } else {
-            core.osd(`MultiASR: done. (Translated subtitle at ${translatedPath})`);
-        }
-    } else {
-        core.osd("MultiASR: done. Primary subtitle loaded.");
+    // 4. Save SRT
+    sidebar.postMessage("original-progress", {
+        percent: 95,
+        message: "Saving subtitle file...",
+        state: "running",
+    });
+    const englishPath = await saveSRT(videoUrl, "en", englishSrt);
+    currentOriginalSrt = englishSrt;
+    currentOriginalPath = englishPath;
+
+    // 5. Load into IINA as primary track
+    try {
+        forceUtf8SubCodepage();
+        core.subtitle.loadTrack(englishPath);
+    } catch (e) {
+        log.warn(`Failed to load subtitle track: ${e.message}`);
+    }
+    core.osd("MultiASR: original subtitle loaded.");
+    return englishPath;
+}
+
+// =========================================================================
+// Stage 2: Translation
+// =========================================================================
+
+async function translateSubtitle(targetLang) {
+    if (!currentOriginalSrt || !currentOriginalPath) {
+        throw new Error("Please generate the original subtitle first (step 1).");
+    }
+    const videoUrl = currentVideoUrl || core.status.url;
+    if (!videoUrl) {
+        throw new Error("No video is currently playing.");
     }
 
-    return out;
+    log.info(`Stage 2 start: target=${targetLang}`);
+
+    // 1. Try local cache for this target language
+    const cachedTr = await loadLocalSRT(videoUrl, targetLang);
+    if (cachedTr) {
+        core.osd(`MultiASR: loaded cached ${targetLang} SRT`);
+        sidebar.postMessage("translate-progress", {
+            percent: 100,
+            message: `Loaded cached SRT: ${cachedTr.path}`,
+            state: "running",
+        });
+        try {
+            forceUtf8SubCodepage();
+            core.subtitle.loadTrack(cachedTr.path, { secondary: true });
+        } catch (e) {
+            log.warn(`Failed to load secondary track: ${e.message}`);
+        }
+        return cachedTr.path;
+    }
+
+    // 2. Translate cues
+    const trConfig = Config.getTranslatorConfig();
+    const translator = createTranslator(trConfig);
+    const cues = parseSRT(currentOriginalSrt);
+    const targetName = langCodeToName(targetLang);
+    const sourceLang = Config.get("source_language", "auto");
+
+    sidebar.postMessage("translate-progress", {
+        percent: 0,
+        message: `Translating ${cues.length} cues to ${targetName}...`,
+        state: "running",
+    });
+
+    const onTrProgress = (p, msg) => {
+        core.osd(`MultiASR Translate: ${msg} (${p}%)`);
+        sidebar.postMessage("translate-progress", {
+            percent: p,
+            message: msg,
+            state: "running",
+        });
+    };
+
+    const translatedCues = await translator.translateCues(
+        cues,
+        sourceLang,
+        targetName,
+        onTrProgress,
+    );
+    const translatedSrt = cuesToASS(translatedCues, `Translated (${targetLang})`);
+
+    // 3. Save translated SRT
+    sidebar.postMessage("translate-progress", {
+        percent: 95,
+        message: "Saving translated subtitle...",
+        state: "running",
+    });
+    const translatedPath = await saveSRT(videoUrl, targetLang, translatedSrt);
+
+    // 4. Load as secondary track
+    try {
+        forceUtf8SubCodepage();
+        core.subtitle.loadTrack(translatedPath, { secondary: true });
+    } catch (e) {
+        log.warn(`Failed to load secondary track: ${e.message}`);
+    }
+    core.osd(`MultiASR: ${targetName} subtitle loaded as secondary.`);
+    return translatedPath;
+}
+
+// =========================================================================
+// Helpers
+// =========================================================================
+
+function langCodeToName(code) {
+    const map = {
+        "zh-CN": "Simplified Chinese",
+        "zh-TW": "Traditional Chinese",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "fr": "French",
+        "de": "German",
+        "es": "Spanish",
+        "ru": "Russian",
+        "pt": "Portuguese",
+        "it": "Italian",
+        "ar": "Arabic",
+        "th": "Thai",
+        "vi": "Vietnamese",
+    };
+    return map[code] || code;
 }

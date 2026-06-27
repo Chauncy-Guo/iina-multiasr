@@ -4,12 +4,12 @@
   "description": "IINA plugin: cloud ASR + LLM translation",
   "private": true,
   "scripts": {
-    "build": "rm -rf dist .parcel-cache && parcel build --target entry --target global --no-source-maps",
-    "build:html": "cp pref.html dist/pref.html",
+    "build": "rm -rf dist .parcel-cache && parcel build --target entry --target global --no-source-maps && npm run build:assets",
+    "build:assets": "mkdir -p dist/ui/sidebar && cp ui/sidebar/index.html dist/ui/sidebar/index.html",
     "clean": "rm -rf dist .parcel-cache",
     "pack": "iina-plugin pack .",
     "link": "iina-plugin link .",
-    "prepare": "npm run clean && npm install --no-audit --no-fund && npm run build && npm run build:html"
+    "prepare": "npm run clean && npm install --no-audit --no-fund && npm run build"
   },
   "targets": {
     "default": {
