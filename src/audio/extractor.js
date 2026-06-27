@@ -1,9 +1,9 @@
 /**
- * audio/extractor.js ?? Extract an audio track from a video file via ffmpeg.
+ * audio/extractor.js -- Extract an audio track from a video file via ffmpeg.
  *
- * The output is a 16kHz mono 16-bit PCM WAV ?? the format required by
+ * The output is a 16kHz mono 16-bit PCM WAV -- the format required by
  * both Doubao and MiMo ASR APIs. We pipe ffmpeg's stdout directly into
- * a temp file under @tmp.
+ * a temp file under the system temp directory.
  */
 
 import { Config } from "../config.js";
@@ -27,6 +27,18 @@ function resolveFFmpegPath() {
 }
 
 /**
+ * Resolve a writable temp directory. We cannot use iina.utils.resolvePath("@tmp")
+ * because resolvePath() does not accept the @tmp pseudo-folder (only @data etc.).
+ * Fall back to the system TMPDIR, or /tmp.
+ */
+function resolveTempDir() {
+    // Prefer the per-user TMPDIR set by macOS (/var/folders/...)
+    const env = (typeof process !== "undefined" && process.env) || {};
+    if (env.TMPDIR && env.TMPDIR.length) return env.TMPDIR.replace(/\/+$/, "");
+    return "/tmp";
+}
+
+/**
  * Extract audio from a video file (or pass-through an existing audio file).
  * Returns the absolute path of the produced WAV file.
  *
@@ -35,7 +47,7 @@ function resolveFFmpegPath() {
  */
 export async function extractAudio(sourcePath) {
     const ffmpeg = resolveFFmpegPath();
-    const tmpDir = iina.utils.resolvePath("@tmp");
+    const tmpDir = resolveTempDir();
     const outPath = `${tmpDir}/multiasr_${Date.now()}.wav`;
 
     const args = [
@@ -48,7 +60,7 @@ export async function extractAudio(sourcePath) {
         outPath,
     ];
 
-    log.info(`Extracting audio via ffmpeg ?? ${outPath}`);
-    await iina.utils.exec(ffmpeg, ...args);
+    log.info(`Extracting audio via ffmpeg -> ${outPath}`);
+    await iina.utils.exec(ffmpeg, args);
     return outPath;
 }

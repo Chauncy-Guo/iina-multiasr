@@ -28,7 +28,7 @@ import {
     Serialization,
     Compression,
 } from "../protocol/volc-header.js";
-import { cuesToSRT, parseSRT } from "../subtitle/srt.js";
+import { cuesToASS, parseSRT } from "../subtitle/srt.js";
 import { log } from "../utils/logger.js";
 
 const FLAG_LAST_PACKET_NO_SEQ = 0x02;
@@ -172,7 +172,7 @@ export class DoubaoASRProvider extends BaseASRProvider {
             }
 
             onProgress(100, "Transcription complete");
-            return cuesToSRT(cues);
+            return cuesToASS(cues, "ASR Original");
         } finally {
             try {
                 ws.close();
@@ -268,7 +268,7 @@ async function sendHandshake(ws, cfg) {
     };
     if (cfg.hotwords) payload.request.hotwords = cfg.hotwords;
 
-    const bytes = new TextEncoder().encode(JSON.stringify(payload));
+    const bytes = stringToBytes(JSON.stringify(payload));
     ws.send(
         buildFrame({
             msgType: MessageType.FULL_CLIENT_REQUEST,
@@ -406,21 +406,59 @@ class ResponseCollector {
 function decodeJSONOrText(bytes) {
     if (!bytes || bytes.length === 0) return null;
     try {
-        const text = new TextDecoder("utf-8").decode(bytes);
+        const text = bytesToString(bytes);
         return JSON.parse(text);
     } catch (_) {
         return null;
     }
 }
 
-async function readFileAsUint8(path) {
-    const resp = await fetch(`file://${encodeURI(path)}`);
-    if (!resp.ok) {
-        throw new ASRError(
-            `Failed to read audio file: ${resp.status}`,
-            { provider: "doubao", code: "FILE_READ" },
-        );
+/** Convert Uint8Array to string without TextDecoder (unavailable in IINA). */
+function bytesToString(bytes) {
+    let result = "";
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        result += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
     }
-    const buf = await resp.arrayBuffer();
-    return new Uint8Array(buf);
+    return result;
+}
+
+/** Convert string to Uint8Array without TextEncoder (unavailable in IINA). */
+function stringToBytes(str) {
+    const bytes = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) {
+        bytes[i] = str.charCodeAt(i) & 0xFF;
+    }
+    return bytes;
+}
+
+async function readFileAsUint8(path) {
+    // Read binary file via base64: use shell to pipe file through base64
+    const { status, stdout } = await iina.utils.exec("/bin/sh", ["-c", `/usr/bin/base64 < ${shellEscapeLocal(path)}`]);
+    if (status !== 0) throw new Error(`readFileAsUint8 failed: ${path}`);
+    return base64ToUint8((stdout || "").replace(/\s+/g, ""));
+}
+
+function shellEscapeLocal(s) {
+    return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+function base64ToUint8(b64) {
+    const CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const lookup = new Uint8Array(128);
+    for (let i = 0; i < CHARS.length; i++) lookup[CHARS.charCodeAt(i)] = i;
+    const pad = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
+    const len = Math.floor(b64.length * 3 / 4) - pad;
+    const bytes = new Uint8Array(len);
+    let j = 0;
+    for (let i = 0; i < b64.length; i += 4) {
+        const a = lookup[b64.charCodeAt(i)] || 0;
+        const b = lookup[b64.charCodeAt(i + 1)] || 0;
+        const c = lookup[b64.charCodeAt(i + 2)] || 0;
+        const d = lookup[b64.charCodeAt(i + 3)] || 0;
+        if (j < len) bytes[j++] = (a << 2) | (b >> 4);
+        if (j < len) bytes[j++] = ((b & 0x0F) << 4) | (c >> 2);
+        if (j < len) bytes[j++] = ((c & 0x03) << 6) | d;
+    }
+    return bytes;
 }

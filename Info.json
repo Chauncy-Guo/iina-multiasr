@@ -21,6 +21,9 @@
     "*"
   ],
   "preferencesPage": "pref.html",
+  "sidebarTab": {
+    "name": "MultiASR"
+  },
   "preferenceDefaults": {
     "asr_provider": "mimo",
     "enable_translation": "true",

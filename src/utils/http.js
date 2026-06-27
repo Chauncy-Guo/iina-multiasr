@@ -1,37 +1,68 @@
 /**
- * utils/http.js -- HTTP helper using the IINA plugin fetch API.
+ * utils/http.js -- HTTP helper using curl via iina.utils.exec.
  *
- * Falls back to executing curl via iina.utils.exec when fetch is
- * unavailable (older IINA versions or sandbox restrictions).
+ * IINA's WKWebView doesn't expose fetch(), and iina.http has
+ * version-dependent behavior. We use curl directly for reliability.
  */
 
 import { log } from "./logger.js";
+import { execCapture } from "./fs-shim.js";
 
 /**
  * Perform a POST with JSON body. Returns parsed JSON.
  * Throws on non-2xx status with the body text in the error.
  */
 export async function postJSON(url, { headers = {}, body, timeoutMs = 120000 } = {}) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const bodyStr = typeof body === "string" ? body : JSON.stringify(body);
+    const headerArgs = [];
+    for (const [k, v] of Object.entries({ "Content-Type": "application/json", ...headers })) {
+        headerArgs.push("-H", `${k}: ${v}`);
+    }
+
+    // Write body to a temp file to avoid shell quoting issues
+    const bodyFile = `/tmp/multiasr_body_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.json`;
+    const respFile = `/tmp/multiasr_resp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.json`;
+    const codeFile = `/tmp/multiasr_code_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.txt`;
+
     try {
-        const resp = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", ...headers },
-            body: typeof body === "string" ? body : JSON.stringify(body),
-            signal: ctrl.signal,
-        });
-        const text = await resp.text();
-        if (!resp.ok) {
-            throw new Error(`HTTP ${resp.status} ${resp.statusText}: ${text.slice(0, 500)}`);
+        // Write body to temp file
+        iina.file.write(bodyFile, bodyStr);
+
+        // Execute curl, capture HTTP status code and body
+        const curlCmd = [
+            "/usr/bin/curl",
+            "-s", "-S",                    // silent but show errors
+            "-w", "\\n%{http_code}",       // append HTTP status code
+            "--max-time", String(Math.ceil(timeoutMs / 1000)),
+            "-X", "POST",
+            ...headerArgs,
+            "-d", `@${bodyFile}`,
+            "-o", respFile,
+            url,
+        ].map(shellEscape).join(" ");
+
+        await execCapture("/bin/sh", "-c", `${curlCmd} > '${codeFile}' 2>&1`);
+
+        // Read response body
+        const { stdout: respText } = await execCapture("/bin/cat", respFile);
+        // Read HTTP status code (last line of curl output)
+        const { stdout: codeText } = await execCapture("/bin/cat", codeFile);
+        const httpCode = parseInt(codeText.trim().split("\n").pop(), 10) || 0;
+
+        if (httpCode < 200 || httpCode >= 300) {
+            throw new Error(`HTTP ${httpCode}: ${respText.slice(0, 500)}`);
         }
+
         try {
-            return JSON.parse(text);
+            return JSON.parse(respText);
         } catch (_) {
-            return text;
+            return respText;
         }
     } finally {
-        clearTimeout(timer);
+        // Cleanup temp files
+        try {
+            await execCapture("/bin/rm", "-f", bodyFile, respFile, codeFile);
+        } catch (_) {}
     }
 }
 
@@ -40,35 +71,65 @@ export async function postJSON(url, { headers = {}, body, timeoutMs = 120000 } =
  * `form` is { fieldName: string | { filename, type, data: Uint8Array } }
  */
 export async function postMultipart(url, { headers = {}, form, timeoutMs = 600000 } = {}) {
-    const fd = new FormData();
+    const args = [];
     for (const [k, v] of Object.entries(form)) {
         if (v && typeof v === "object" && v.data instanceof Uint8Array) {
-            fd.append(k, new Blob([v.data], { type: v.type || "application/octet-stream" }), v.filename || k);
+            // Binary data: write to temp file then use curl -F file=@tmpfile
+            const tmpBin = `/tmp/multiasr_bin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            iina.file.write(tmpBin, String.fromCharCode.apply(null, v.data));
+            args.push("-F", `${k}=@${tmpBin};type=${v.type || "application/octet-stream"}`);
         } else {
-            fd.append(k, v);
+            args.push("-F", `${k}=${String(v)}`);
         }
     }
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+
+    const headerArgs = [];
+    for (const [k, v] of Object.entries(headers)) {
+        headerArgs.push("-H", `${k}: ${v}`);
+    }
+
+    const respFile = `/tmp/multiasr_resp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.json`;
+    const codeFile = `/tmp/multiasr_code_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.txt`;
+
     try {
-        const resp = await fetch(url, {
-            method: "POST",
-            headers: { ...headers }, // fetch will set multipart boundary
-            body: fd,
-            signal: ctrl.signal,
-        });
-        const text = await resp.text();
-        if (!resp.ok) {
-            throw new Error(`HTTP ${resp.status} ${resp.statusText}: ${text.slice(0, 500)}`);
+        const curlArgs = [
+            "/usr/bin/curl",
+            "-s", "-S",
+            "-w", "\\n%{http_code}",
+            "--max-time", String(Math.ceil(timeoutMs / 1000)),
+            "-X", "POST",
+            ...headerArgs,
+            ...args,
+            "-o", respFile,
+            url,
+        ];
+
+        await execCapture("/bin/sh", "-c", curlArgs.map(shellEscape).join(" ") + ` > '${codeFile}' 2>&1`);
+
+        const { stdout: respText } = await execCapture("/bin/cat", respFile);
+        const { stdout: codeText } = await execCapture("/bin/cat", codeFile);
+        const httpCode = parseInt(codeText.trim().split("\n").pop(), 10) || 0;
+
+        if (httpCode < 200 || httpCode >= 300) {
+            throw new Error(`HTTP ${httpCode}: ${respText.slice(0, 500)}`);
         }
+
         try {
-            return JSON.parse(text);
+            return JSON.parse(respText);
         } catch (_) {
-            return text;
+            return respText;
         }
     } finally {
-        clearTimeout(timer);
+        try {
+            await execCapture("/bin/rm", "-f", respFile, codeFile);
+        } catch (_) {}
     }
+}
+
+function shellEscape(s) {
+    if (typeof s !== "string") s = String(s);
+    // Use single quotes, escaping any embedded single quotes
+    return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
 /**
